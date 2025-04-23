@@ -1,0 +1,1 @@
+Some example scripts for `bream` in lieu of actual documentation.
