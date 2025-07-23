@@ -1,3 +1,5 @@
+# note: won't work exactly after refactoring bream
+
 """Simple dummy demo."""
 
 from __future__ import annotations

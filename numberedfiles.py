@@ -1,3 +1,5 @@
+# note: won't work exactly after refactoring bream
+
 from __future__ import annotations
 
 from random import random, randint
