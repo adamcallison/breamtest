@@ -21,7 +21,7 @@ from time import sleep
 from statistics import mean, stdev
 from contextlib import suppress
 
-from bream.core import Source, BatchRequest, Batch, Batches, Stream
+from bream.core import Source, BatchRequest, Batch, Stream
 
 
 def file_creation_loop(testdir: Path) -> None:
@@ -142,11 +142,11 @@ class NumbersFromFilesByCreationTimestampSource(Source):
                 cleaned = [x for x in f.read().strip().split("\n") if x]
             nums = [int(x) for x in cleaned]
             data[path.name] = nums
-        
+
         return Batch(data=data, read_to=timestamps_of_files_to_read[-1])
     
 
-def write_stats(batches: Batches, output_file: Path) -> None:
+def write_stats(batch: Batch, output_file: Path) -> None:
     """Example batch function that takes data from NumbersFromFilesByCreationTimestampSource.
     
     This will be given to the bream `Stream` object as the batch processing function and
@@ -162,7 +162,6 @@ def write_stats(batches: Batches, output_file: Path) -> None:
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     # get and report batch of numbers:
-    batch = list(batches.batches.values())[0] # in this example we know there is only one source
     assert batch is not None
     print(f"Seen batch: {batch}")
     nums: dict[str, list[int]] = batch.data
@@ -209,7 +208,7 @@ def start_stream(input_dir: Path, output_file: Path, stream_dir: Path) -> None:
 
     # define and start the stream: batch function is flaky so wrap it in a restart-loop:
     while True:
-        stream = Stream([source], stream_dir)
+        stream = Stream(source, stream_dir)
         # start stream in background thread, and don't read batches more often than 30 secs
         stream.start(batch_func, min_batch_seconds=30)
         stream.wait()  # block until stream dies
