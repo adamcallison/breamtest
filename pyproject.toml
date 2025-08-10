@@ -9,4 +9,4 @@ dependencies = [
 ]
 
 [tool.uv.sources]
-bream = { git = "https://github.com/adamcallison/bream.git" }
+bream = { git = "https://github.com/adamcallison/bream.git", rev = "main" }

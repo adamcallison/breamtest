@@ -5,7 +5,7 @@ requires-python = ">=3.10"
 [[package]]
 name = "bream"
 version = "0.1.0"
-source = { git = "https://github.com/adamcallison/bream.git#56e2da38f7e06f6f59b0cfc6b9536ce59c0494bf" }
+source = { git = "https://github.com/adamcallison/bream.git?rev=main#efbd66b0583558a939537c1d397121410152c1ea" }
 dependencies = [
     { name = "cloudpathlib" },
     { name = "typing-extensions" },
@@ -20,7 +20,7 @@ dependencies = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "bream", git = "https://github.com/adamcallison/bream.git" }]
+requires-dist = [{ name = "bream", git = "https://github.com/adamcallison/bream.git?rev=main" }]
 
 [[package]]
 name = "cloudpathlib"

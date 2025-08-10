@@ -20,8 +20,11 @@ from sys import argv
 from time import sleep
 from statistics import mean, stdev
 from contextlib import suppress
+from datetime import datetime, timezone
+from itertools import islice, takewhile
+from typing import cast
 
-from bream.core import Source, BatchRequest, Batch, Stream
+from bream.core import Source, BatchRequest, Batch, Stream, StreamOptions
 
 
 def file_creation_loop(testdir: Path) -> None:
@@ -72,14 +75,29 @@ class NumbersFromFilesByCreationTimestampSource(Source):
         self._filedir = filedir
         self._num_files_per_batch = num_files_per_batch
 
-    def _get_timestamp_to_file_map(self) -> dict[int, Path]:
-        """Get a map of file-creation timestamps to file path for each file in the dir."""
+    def _get_sorted_timestamp_to_filename_map(
+            self, *, later_than: int | None = None,
+        ) -> dict[int, str]:
+        """Get a map of file-creation timestamps to file path for each file in the dir.
+        
+        If `later_than` is not None, files with this or earlier timestamp will not be
+        included.
+        """
         files = list(self._filedir.glob("*"))
-        res: dict[int, Path] = {}
+        timestamp_to_filename_map: dict[int, str] = {}
         for f in files:
             with suppress(FileNotFoundError):  # avoid cleanup race-condition of file_creation_loop
-                res[int(f.stat().st_ctime*1000)] = f
-        return res
+                timestamp_to_filename_map[int(f.stat().st_ctime*1000)] = f.name
+        if later_than is None:
+            later_than = cast(int, -float("inf"))
+        return {
+            k: v for k, v in sorted(timestamp_to_filename_map.items()) if k > later_than
+        }
+    
+    def _read_file(self, filename: str) -> list[int]:
+        with (self._filedir / filename).open("r") as f:
+            cleaned = [x for x in f.read().strip().split("\n") if x]
+        return [int(x) for x in cleaned]
 
     def read(self, br: BatchRequest) -> Batch | None:
         """Read a batch of number-lists from the directory.
@@ -106,45 +124,35 @@ class NumbersFromFilesByCreationTimestampSource(Source):
                 If there is no data available, this should be None.
         """
 
-        # if there are no files, we can't read any data:
-        if not (timestamp_to_file_map := self._get_timestamp_to_file_map()):
-            return None
-    
-        # get the timestamps in sorted order
-        timestamps = sorted(timestamp_to_file_map)
+        # some type narrowing
+        br_read_to = cast(int, br.read_to)
+        br_read_from_after = cast(int, br.read_from_after)
 
-        # read from the next timestamp if a 'read_from_after' is given, otherwise start at beginnig
-        read_from_idx = (
-            (timestamps.index(br.read_from_after) + 1) if br.read_from_after is not None else 0
+        # find what files are unread
+        unread_timestamp_to_fname = self._get_sorted_timestamp_to_filename_map(
+            later_than=br_read_from_after
         )
 
-        # if there are no more files to read, we won't ready any data
-        if read_from_idx == len(timestamps):
+        # if there are no files to read, we don't return a batch
+        if not unread_timestamp_to_fname:
             return None
-        
-        if br.read_to is not None:
-            # if told where to read to, respect it
-            read_to_idx = timestamps.index(br.read_to)
-        else:
-            # otherwise read as many files as configured to
-            read_to_idx = min(read_from_idx + self._num_files_per_batch - 1, len(timestamps) - 1)
 
-        # get the actual timestamps of files we should read
-        timestamps_of_files_to_read =  timestamps[read_from_idx:read_to_idx+1]
-            
-        # get the file paths we need to read
-        files_to_read = [timestamp_to_file_map[ts] for ts in timestamps_of_files_to_read]
+        # find out which of the unread files we should read for this batch
+        iterfrom = (
+            # respect BatchRequest.read_to if it is not None
+            takewhile((lambda x: x[0] <= br_read_to), unread_timestamp_to_fname.items())
+            if br.read_to is not None
+            # otherwise take as many files as we're configured to
+            else islice(unread_timestamp_to_fname.items(), self._num_files_per_batch)
+        )
+        timestamp_to_filename_to_read = {k: v for k, v in iterfrom}
 
         # get the data from the files
-        data: dict[str, list[int]] = {}
-        for path in files_to_read:
-            with path.open("r") as f:
-                cleaned = [x for x in f.read().strip().split("\n") if x]
-            nums = [int(x) for x in cleaned]
-            data[path.name] = nums
+        data = {fn: self._read_file(fn) for fn in timestamp_to_filename_to_read.values()}
 
-        return Batch(data=data, read_to=timestamps_of_files_to_read[-1])
-    
+        # return a batch
+        return Batch(data=data, read_to=max(timestamp_to_filename_to_read.keys()))
+
 
 def write_stats(batch: Batch, output_file: Path) -> None:
     """Example batch function that takes data from NumbersFromFilesByCreationTimestampSource.
@@ -163,7 +171,7 @@ def write_stats(batch: Batch, output_file: Path) -> None:
 
     # get and report batch of numbers:
     assert batch is not None
-    print(f"Seen batch: {batch}")
+    print(f"Seen batch: {batch} at {datetime.now(tz=timezone.utc).isoformat()}")
     nums: dict[str, list[int]] = batch.data
     # as per the source, the data is a map of the form {<filename>: [<numbers>, ...], ...}
 
@@ -206,14 +214,24 @@ def start_stream(input_dir: Path, output_file: Path, stream_dir: Path) -> None:
     # define the batch function:
     batch_func = partial(write_stats, output_file=output_file)
 
-    # define and start the stream: batch function is flaky so wrap it in a restart-loop:
+    # define and start the stream:
+    stream = Stream(
+        source,
+        stream_dir,
+        stream_options=StreamOptions(max_retry_count=None, min_seconds_between_retries=10),
+    )
+    #start stream in background thread, and don't read batches more often than 3.6 secs
+    stream.start(batch_func, min_batch_seconds=3.6)
+
+    # batch function is flaky so let's monitor stream for errors
+    error_count = 0
     while True:
-        stream = Stream(source, stream_dir)
-        # start stream in background thread, and don't read batches more often than 30 secs
-        stream.start(batch_func, min_batch_seconds=30)
-        stream.wait()  # block until stream dies
-        if stream.status.error:  # stream died which means an error happened, check status
-            print(f"error raised: {repr(stream.status.error)}")
+        new_error_count = len(stream.status.errors)
+        if new_error_count != error_count:
+            error_count = new_error_count
+            print(f"New error detected (total {error_count}): {repr(stream.status.errors[-1])}")
+            sleep(0.25)
+
 
 if __name__ == "__main__":
     if argv[1] == "startsource":
